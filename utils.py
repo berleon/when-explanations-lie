@@ -342,7 +342,7 @@ def create_replacement_class(analyser_cls):
             ])
             feed_dict[self._replace_tensor] = replacement
             
-            tf_X = repl_analyser._analyzer_model.inputs[0]
+            tf_X = self._analyzer_model.inputs[0]
             feed_dict[tf_X] = X
             return sess.run(self._cosine_similarities, feed_dict=feed_dict)
             
