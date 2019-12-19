@@ -182,7 +182,7 @@ def get_nice_resnet_layers(model):
             nice_name = "conv{}_{}{}".format(block_idx, subblock_idx, layer_idx) 
         return nice_name
         
-    nice_layer_names_resnet = OrderedDict()
+    nice_layer_names_resnet = OrderedDict([(0, "input")])
     for i in range(len(model.layers)):
         layer = model.get_layer(index=i)
         if type(layer) == keras.layers.Conv2D:
