@@ -107,6 +107,12 @@ def l2_flipped(x, y):
     return max(l2, l2_flipped)
 
 
+def cosine_similarity(U, V):
+    v_norm =  V / np.linalg.norm(V, axis=0, keepdims=True)
+    u_norm = U / np.linalg.norm(U, axis=0, keepdims=True)
+    return (v_norm.T @ u_norm)
+
+
 def norm_image(x):
     mi = x.min()
     ma = x.max()
@@ -198,7 +204,7 @@ def get_nice_resnet_layers(model):
             nice_layer_names_resnet[i] = 'avgpool'
         elif type(layer) == keras.layers.Add:
             prev_layer = model.get_layer(index=i-1)
-            
+            print(prev_layer)
             block, branch = prev_layer.name.split('_')
             block_spec = block.lstrip('bn')
             block_idx = block_spec[0]
@@ -291,7 +297,7 @@ def get_analyser_params(input_range, smoothgrad_scale=0.15):
 colors = sns.color_palette('colorblind', n_colors=5)
 
 mpl_styles = OrderedDict([
-    ('GuidedBP',                   {'marker': 'X',   'color': colors[0]}),
+    ('GuidedBP',                   {'marker': '$G$',   'color': colors[0]}),
     ('Deconv',                     {'marker': '$D$', 'color': colors[1]}),
     ('LRP-z',                      {'marker': 'D',   'color': colors[2]}),
     ('DTD',                        {'marker': '$T$', 'color': colors[3]}),
@@ -346,7 +352,7 @@ def create_replacement_class(analyser_cls):
             feed_dict[tf_X] = X
             return sess.run(self._cosine_similarities, feed_dict=feed_dict)
             
-        def get_cosine_grad(self, X, replacement, intermediate_values):
+        def get_cosine_grad_old(self, X, replacement, intermediate_values):
             sess = keras.backend.get_session()
             feed_dict = OrderedDict([
                 (t, v) for t, v in zip(self._intermediate_references, intermediate_values)
@@ -376,7 +382,7 @@ def create_replacement_class(analyser_cls):
                 self._cosine_similarities.append(cos)
                 
             cos_sim = self._cosine_similarities[-1]
-            self._cosine_grads = [g for g in tf.gradients(tf.reduce_mean(cos_sim), self._intermediate_tensors) if g is not None]
+            #self._cosine_grads = [g for g in tf.gradients(tf.reduce_mean(cos_sim), self._intermediate_tensors) if g is not None]
             
     return ReplaceBackward 
 
