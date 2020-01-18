@@ -274,20 +274,24 @@ def get_analyser_params(input_range, smoothgrad_scale=0.15):
         ('Deconv',  "deconvnet",  'abs.max', [], {}),
         ('DTD', "deep_taylor.bounded", 'sum', [],
              {"low": input_range[0], "high": input_range[1]}),
-        ('LRP-$\\alpha=1, \\beta=0$',  'lrp.alpha_beta', 
+        ('LRP $\\alpha1\\beta0$',  'lrp.alpha_beta', 
              'sum', [], {'alpha': 1, 'beta': 0}),
-        ('LRP-$\\alpha=2, \\beta=1$',  'lrp.alpha_beta', 
+        ('LRP $\\alpha2\\beta1$',  'lrp.alpha_beta', 
              'sum', [], {'alpha': 2, 'beta': 1}),
-        ('LRP-$\\alpha=5, \\beta=4$',  'lrp.alpha_beta', 
+        ('LRP $\\alpha5\\beta4$',  'lrp.alpha_beta', 
              'sum', [], {'alpha': 5, 'beta': 4}),
         #('$\\alpha=10, \\beta=9$-LRP',  'lrp.alpha_beta', 
         #     'sum', [], {'alpha': 10, 'beta': 9}),
-        ('LRP-cmp-$\\alpha=1$', 'lrp.sequential_preset_a', 
+        ('LRP CMP $\\alpha1\\beta0$', 'lrp.sequential_preset_a', 
              'sum', [], {"epsilon": 1e-10}), 
-        ('LRP-cmp-$\\alpha=2$',  'lrp.sequential_preset_b', 
+        ('LRP CMP $\\alpha2\\beta1$',  'lrp.sequential_preset_b', 
              'sum', [], {"epsilon": 1e-10}), 
         ("PatternAttr.", "pattern.attribution",
              'sum', ['exclude_resnet50'], {}),
+        ("DeepLift R.Can.", "deeplift.wrapper", 'sum', [],
+             {'nonlinear_mode': 'reveal_cancel'}),
+        ("DeepLift Resc.",  "deeplift.wrapper", 'sum', [],
+             {'nonlinear_mode': 'rescale'}),
         ('LRP-z', 'lrp.z', 'sum', [], {}),
         ('SmoothGrad',  "smoothgrad",  'abs.max', ['exclude_cos_sim'],
              {"augment_by_n": 50, "noise_scale": noise_scale}),
@@ -297,104 +301,105 @@ def get_analyser_params(input_range, smoothgrad_scale=0.15):
 colors = sns.color_palette('colorblind', n_colors=5)
 
 mpl_styles = OrderedDict([
-    ('GuidedBP',                   {'marker': '$G$',   'color': colors[0]}),
-    ('Deconv',                     {'marker': '$D$', 'color': colors[1]}),
+    ('GuidedBP',                   {'marker': '$G$', 'color': colors[0]}),
+    ('Deconv',                     {'marker': '$V$', 'color': colors[1]}),
     ('LRP-z',                      {'marker': 'D',   'color': colors[2]}),
     ('DTD',                        {'marker': '$T$', 'color': colors[3]}),
     ('PatternAttr.',               {'marker': '$P$', 'color': colors[4]}),
-    ('LRP-$\\alpha=1, \\beta=0$',  {'marker': '<',   'color': colors[0]}),
-    ('LRP-$\\alpha=2, \\beta=1$',  {'marker': '>',   'color': colors[1]}),
-    ('LRP-$\\alpha=5, \\beta=4$',  {'marker': '^',   'color': colors[2]}),
-    ('LRP-cmp-$\\alpha=1$',        {'marker': 's',   'color': colors[3]}),
-    ('LRP-cmp-$\\alpha=2$',        {'marker': 'P',   'color': colors[4]}),
-    ('SmoothGrad',                 {'marker': 'o',   'color': colors[0]}),
+    ('LRP $\\alpha1\\beta0$',      {'marker': '<',   'color': colors[0]}),
+    ('LRP $\\alpha2\\beta1$',      {'marker': '>',   'color': colors[1]}),
+    ('LRP $\\alpha5\\beta4$',      {'marker': '^',   'color': colors[2]}),
+    ('LRP CMP $\\alpha1\\beta0$',  {'marker': 's',   'color': colors[3]}),
+    ('LRP CMP $\\alpha2\\beta1$',  {'marker': 'P',   'color': colors[4]}),
+    ('DeepLift R.Can.',            {'marker': '$D$',   'color': colors[0]}),
+    ('DeepLift Resc.',             {'marker': '$D$',   'color': colors[1]}),
+    ('SmoothGrad',                 {'marker': 'o',   'color': colors[2]}),
     ('Gradient',                   {'marker': 'v',   'color': 'black'}),
 ])
+
 
 
 def create_replacement_class(analyser_cls):
     assert issubclass(analyser_cls, ReverseAnalyzerBase)
     class ReplaceBackward(analyser_cls):
-        def __init__(self, model, replace_layer, replace_shape, *args, **kwargs):
+        def __init__(self, model, *args, **kwargs):
             kwargs['reverse_keep_tensors'] = True
             super().__init__(model, *args, **kwargs)
-            self._replace_shape = replace_shape
-            self._replace_layer = replace_layer
-            self._replace_tensor = None
-
-        def _prepare_model(self, model):
-            model, analysis_inputs, stop_analysis_at_tensor = super()._prepare_model(model)
-            self._replace_tensor = keras.layers.Input(name='replace_backward', 
-                                                      batch_shape=self._replace_shape)   
-            self._replace_inputs = analysis_inputs + [self._replace_tensor]
-            return model, analysis_inputs + [self._replace_tensor], stop_analysis_at_tensor
-
-        def _create_analysis(self, *args, **kwargs):
-            def check_layer(layer):
-                return layer == self._replace_layer
-
-            def replace_backward(Xs, Ys, Rs, reverse_state):               
-                return [keras.layers.Lambda(lambda x: 2*x / 2)(self._replace_tensor)]
-
-            self._add_conditional_reverse_mapping(check_layer, replace_backward)
-            outputs, intermediate = super()._create_analysis(*args, **kwargs)
-            self._create_cos_model(intermediate)
-            return outputs, intermediate
         
-        def get_cosine(self, X, replacement, intermediate_values):
+        def _create_analysis(self, *args, **kwargs):
+            outputs, relevances_per_layer = super()._create_analysis(*args, **kwargs)
+            self._relevances_per_layer = relevances_per_layer[::-1]
+            return outputs, relevances_per_layer
+        
+        def _get_layer_idx(self, name):
+            layer = self._model.get_layer(name='dense_2')
+            return self._model.layers.index(layer)
+        
+        def get_relevances(self, input_value, relevance_value,  
+                           set_layer, selected_layers):
+            """
+            return relevance values
+            """
             sess = keras.backend.get_session()
-            feed_dict = OrderedDict([
-                (t, v) for t, v in zip(self._intermediate_references, intermediate_values)
-            ])
-            feed_dict[self._replace_tensor] = replacement
+            inp = self._analyzer_model.inputs[0]
+            set_layer_idx = self._get_layer_idx(set_layer)
+            selected_layer_idxs = [
+                self._get_layer_idx(n) for n in selected_layers]
+            rel_tensor = self._relevances_per_layer[set_layer_idx]
             
-            tf_X = self._analyzer_model.inputs[0]
-            feed_dict[tf_X] = X
-            return sess.run(self._cosine_similarities, feed_dict=feed_dict)
-            
-        def get_cosine_grad_old(self, X, replacement, intermediate_values):
-            sess = keras.backend.get_session()
-            feed_dict = OrderedDict([
-                (t, v) for t, v in zip(self._intermediate_references, intermediate_values)
-            ])
-            feed_dict[self._replace_tensor] = replacement
-            
-            tf_X = repl_analyser._analyzer_model.inputs[0]
-            feed_dict[tf_X] = X
-            return sess.run(self._cosine_grads, feed_dict=feed_dict)
-            
-            
-        def _create_cos_model(self, intermediate_tensors):
-            self._intermediate_tensors = intermediate_tensors[1:]
-            self._intermediate_references = [
-                keras.layers.Input(name='intermediate_{}'.format(i), batch_shape=tens.shape)
-                for i, tens in enumerate(self._intermediate_tensors)
-            ]
-            self._replace_inputs 
-            
-            self._cosine_similarities = [] 
-            
-            for v, r in zip(self._intermediate_tensors, self._intermediate_references):
-                
-                r_norm = tf.nn.l2_normalize(r, axis=-1)
-                v_norm = tf.nn.l2_normalize(v, axis=-1)
-                cos = 1 - tf.losses.cosine_distance(r_norm, v_norm, axis=-1, reduction='none')
-                self._cosine_similarities.append(cos)
-                
-            cos_sim = self._cosine_similarities[-1]
-            #self._cosine_grads = [g for g in tf.gradients(tf.reduce_mean(cos_sim), self._intermediate_tensors) if g is not None]
-            
+            return sess.run(
+                [self._relevances_per_layer[i] for i in selected_layer_idxs],
+                feed_dict={ 
+                    inp: input_value,
+                    rel_tensor: relevance_value
+           })
+        
     return ReplaceBackward 
 
 
-def get_replacement_analyser(model, analyser_cls, replacement_layer_idx, model_output_shapes=None, **kwargs):
+def get_replacement_analyser(model, analyser_cls, **kwargs):
     if type(analyser_cls) == str:
         analyser_cls = innvestigate.analyzer.analyzers[analyser_cls]
     replacement_cls = create_replacement_class(analyser_cls)
     
-    if model_output_shapes is None:
-        model_output_shapes = get_output_shapes(model)
-    
-    replacement_shape = model_output_shapes[replacement_layer_idx - 1]
-    replace_layer = model.layers[replacement_layer_idx]
-    return replacement_cls(model, replace_layer, replacement_shape, **kwargs), replacement_shape
+    return replacement_cls(model, **kwargs)
+
+
+
+def conv_as_matrix(x):
+    if len(x.shape) == 2:
+        return x
+    if len(x.shape) == 3:
+        x = x[None]
+    b, h, w, c = x.shape
+    return np.reshape(x, (b*h*w, c))
+
+
+def cosine_similarity_dot(U, V):
+    v_norm =  V / np.linalg.norm(V, axis=1, keepdims=True)
+    u_norm = U / np.linalg.norm(U, axis=1, keepdims=True)
+    return (v_norm * u_norm).sum(1)
+
+def pairwise_cosine_similarity(matrices):
+    cos_sims = []
+    for i, j in itertools.combinations(range(len(matrices)), 2):
+        u = matrices[i]
+        v = matrices[j]
+        cos_sims.append(cosine_similarity_dot(u, v))
+    return np.stack(cos_sims)
+
+def cosine_similarities_from_relevances(relevance_per_layers):
+    cos_sims = []
+    for rel_per_layer in relevance_per_layers:
+        rel_per_layer = [conv_as_matrix(r[None]) for r in rel_per_layer]
+
+        cos_sims.append(pairwise_cosine_similarity(rel_per_layer).flatten())
+    return cos_sims
+
+def cosine_similarities_from_relevances(relevance_per_layers):
+    cos_sims = []
+    for rel_per_layer in relevance_per_layers:
+        rel_per_layer = [conv_as_matrix(r[None]) for r in rel_per_layer]
+
+        cos_sims.append(pairwise_cosine_similarity(rel_per_layer).flatten())
+    return cos_sims
