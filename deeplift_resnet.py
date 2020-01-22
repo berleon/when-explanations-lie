@@ -10,6 +10,7 @@ from deeplift.conversion.kerasapi_conversion import KerasKeys
 import keras.backend as K
 from keras.utils.generic_utils import transpose_shape
 import tensorflow as tf
+import keras
 
 
 def monkey_patch_Merge_compute_shape(self, input_shapes):                       
@@ -216,11 +217,14 @@ def add_conversion(config, name, verbose, **kwargs):
         ConcatForAdd(name=name + "_cat_add"), flatten, 
         Add(name=name), BackToConvForAdd(flatten, name=name + '_back_to_conv')])
 
-
+import importlib
+import deeplift.conversion.kerasapi_conversion
 from deeplift.conversion.kerasapi_conversion import layer_name_to_conversion_function as deeplift_layer_name_to_conversion_function
 
-if 'copy_layer_name_to_conversion_function' not in globals():
-    copy_layer_name_to_conversion_function = copy.deepcopy(deeplift_layer_name_to_conversion_function)
+importlib.reload(deeplift.conversion.kerasapi_conversion)
+
+copy_layer_name_to_conversion_function = copy.deepcopy(
+    deeplift.conversion.kerasapi_conversion.layer_name_to_conversion_function)
     
 
 def monkey_patched_layer_name_to_conversion_function(layer_name):  
@@ -256,6 +260,8 @@ def deeplift_prediction(dp_model, output_layer=None):
 class DeepLiftRelevanceReplacer:
     def __init__(self, deeplift_wrapper):
         self.deeplift_wrapper = deeplift_wrapper
+        if not hasattr(self.deeplift_wrapper, "_deep_lift_func"): 
+            self.deeplift_wrapper._create_deep_lift_func()
         self.model = self.deeplift_wrapper._deeplift_model
         self.layers = list(self.model._name_to_layer.values())
         self.layer_names = list(self.model._name_to_layer.keys())
@@ -283,7 +289,7 @@ class DeepLiftRelevanceReplacer:
         set_layer_idx = self._get_layer_idx(set_layer)
         changed_layer = self.layers[set_layer_idx]
         selected_layer_idxs = [self._get_layer_idx(name) for name in selected_layers]
-        print(selected_layer_idxs)
+        
         if reference is None:
             reference = np.zeros_like(input_value)
             
@@ -297,7 +303,6 @@ class DeepLiftRelevanceReplacer:
                 reference[i:i+1],
             )
             for i, cont in enumerate(contribs):
-                print(cont.shape)
                 aggregated_contribs[i].append(cont)
                 
         self.layers[-1].set_inactive()
