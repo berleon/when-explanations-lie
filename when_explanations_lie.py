@@ -29,6 +29,7 @@ import innvestigate
 import innvestigate.applications.imagenet
 import innvestigate.utils as iutils
 import innvestigate.utils as iutils
+from innvestigate.utils.keras import checks as kchecks
 import innvestigate.utils.visualizations as ivis
 from innvestigate.analyzer.relevance_based.relevance_analyzer import LRP
 from innvestigate.analyzer.base import AnalyzerNetworkBase, ReverseAnalyzerBase
@@ -336,6 +337,8 @@ class LayerNames:
         elif model_name == 'cifar10':
             self._idx2nice = OrderedDict([
                 (i, l.name) for i, l in enumerate(model.layers)])
+        else:
+            raise ValueError()
         self._nice2idx = OrderedDict([(n, i) for i, n in self._idx2nice.items()])
         
         self._idx2raw = OrderedDict([i, l.name] for i, l in enumerate(model.layers))
@@ -363,6 +366,9 @@ class LayerNames:
     
     def nice_names(self):
         return list(self._nice2idx.keys())
+    
+    def raw_names(self):
+        return list(self._raw2idx.keys())
             
 def get_nice_layer_names(resnet):
     return {
@@ -401,7 +407,7 @@ def get_analyser_params(input_range, smoothgrad_scale=0.15):
         ('LRP CMP $\\alpha2\\beta1$',  'lrp.sequential_preset_b', 
              'sum', [], {"epsilon": 1e-10}), 
         ("PatternAttr.", "pattern.attribution",
-             'sum', ['exclude_resnet50'], {}),
+             'sum', ['exclude_resnet50', 'exclude_cifar10'], {}),
 
         ('LRP-z', 'lrp.z', 'sum', [], {}),
         ('SmoothGrad',  "smoothgrad",  'abs.max', ['exclude_cos_sim'],
@@ -486,7 +492,7 @@ def get_rect_grad_reverse_rule_layer(percentile):
         def rectgrad(inputs):
             y, grad = inputs
             activation_grad = y * grad
-            thresh = threshold(activation_grad, percentile)
+            thresh = RectGrad.threshold(activation_grad, percentile)
             return tf.where(thresh < activation_grad, grad, tf.zeros_like(grad))
 
         rectgrad_layer = keras.layers.Lambda(rectgrad)
@@ -511,6 +517,16 @@ class RectGrad(innvestigate.analyzer.base.ReverseAnalyzerBase):
         )
 
         super(RectGrad, self).__init__(model, **kwargs)
+        
+    @staticmethod
+    def threshold(x, q):
+        if len(x.shape.as_list()) > 3:
+            thresh = tf.contrib.distributions.percentile(
+                x, q, axis=[1,2,3], keep_dims=True)
+        else:
+            thresh = tf.contrib.distributions.percentile(
+                x, q, axis=1, keep_dims=True)
+        return thresh
 
     def _create_analysis(self, *args, **kwargs):
 
