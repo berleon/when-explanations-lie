@@ -439,7 +439,77 @@ mpl_styles = OrderedDict([
     ('DeepLIFT Resc.',             {'marker': '$D$',   'color': colors[3]}),
 ])
 
+class CIFAR10Meta:
+    def __init__(self, model, n_selected_images):
+        (self.ex_image, self.ex_target, self.ex_image_idx, 
+         self.images, self.image_indices) = load_images_cifar10(n_selected_images)
+        self.names = LayerNames(model, 'cifar10')
+        self.n_layers = len(model.layers)
+        self.model_name = 'cifar10'
+        self.output_shapes = get_output_shapes(model)
+        self.csc_replacement_layers = ['fc6', 'fc5', 'conv4', 'conv3', 'conv2']
+        self.patterns = None
+        
+        self.csc_histogram_layers = copy.deepcopy(self.csc_replacement_layers)
+        self.csc_histogram_layers.extend(['conv1', 'input'])
+        self.csc_histogram_layers = [self.names.to_raw(l)
+                                     for l in self.csc_histogram_layers]
+        self.csc_replacement_layers = [self.names.to_raw(l)
+                                    for l in self.csc_replacement_layers]
 
+class ImageNetMeta:
+    def __init__(self, model, model_name, innv_net,  n_val_images, 
+                 imagenet_val_dir, ex_image_path
+                ):
+        (self.ex_image, self.ex_target, self.ex_image_idx, 
+         self.images, self.image_indices) = load_images_imagenet(
+            innv_net, imagenet_val_dir, ex_image_path, n_val_images)
+        self.patterns = innv_net['patterns']
+        self.names = LayerNames(model, model_name)
+        self.n_layers = len(model.layers)
+        self.model_name = model_name
+        self.output_shapes = get_output_shapes(model)
+        self.csc_replacement_layers = { 
+            'vgg16':  ['fc3', 'fc1', 'conv4_3', 'conv3_3', 'conv2_2'],
+            'resnet50': ['dense', 'block5_1', 'block4_2', 
+                         'block3_4', 'block3_2', 'block2_2'],
+        }[model_name]
+        
+        self.randomization_layers = {
+            'vgg16': ["conv1_1", "conv2_1",  "conv3_1", "conv4_1",
+                      "conv4_3",  "conv5_1", "conv5_3", "fc1", "fc3"],
+            'resnet50': ['conv1', 'block2_2', 'block3_1', 'block3_3',
+                         'block4_1', 'block4_6', 'block5_2', 'dense'],
+        }[model_name]
+        
+        
+        self.csc_histogram_layers = copy.deepcopy(self.csc_replacement_layers)
+        if model_name == 'vgg16':
+            self.csc_histogram_layers.extend(['conv1_1', 'input'])
+        elif model_name == 'resnet50':
+            self.csc_histogram_layers.extend(['conv2_1a', 'input'])
+            
+        self.csc_histogram_layers = [self.names.to_raw(l)
+                                     for l in self.csc_histogram_layers]
+        self.csc_replacement_layers = [self.names.to_raw(l)
+                                     for l in self.csc_replacement_layers]
+        self.n_layers = len(model.layers)
+
+
+
+def load_model_and_meta(model_name, n_selected_imgs=200, load_weights=True, clear_session=True):
+    if clear_session:
+        keras.backend.clear_session()
+    if model_name in ['vgg16', 'resnet50']:
+        model, innv_net, color_conversion = load_model(model_name, load_weights) 
+        meta = ImageNetMeta(model, model_name, innv_net, n_selected_imgs)
+    elif model_name == 'cifar10':
+        model, _, _ = load_model('cifar10', load_weights)
+        meta = CIFAR10Meta(model, n_selected_imgs)
+    else:
+        raise ValueError()
+    return model, meta
+        
 
 def create_replacement_class(analyser_cls):
     assert issubclass(analyser_cls, ReverseAnalyzerBase)
@@ -490,14 +560,27 @@ def get_replacement_analyser(model, analyser_cls, **kwargs):
 def get_rect_grad_reverse_rule_layer(percentile):
     def RectGradReverseReLULayer(Xs, Ys, reversed_Ys, reverse_state):
         def rectgrad(inputs):
+            def threshold(x, q):
+                if len(x.shape.as_list()) > 3:
+                    thresh = tf.contrib.distributions.percentile(
+                        x, q, axis=[1,2,3], keep_dims=True)
+                else:
+                    thresh = tf.contrib.distributions.percentile(
+                        x, q, axis=1, keep_dims=True)
+                return thresh
+    
             y, grad = inputs
             activation_grad = y * grad
-            thresh = RectGrad.threshold(activation_grad, percentile)
+            thresh = threshold(activation_grad, percentile)
             return tf.where(thresh < activation_grad, grad, tf.zeros_like(grad))
 
         rectgrad_layer = keras.layers.Lambda(rectgrad)
-
-        return [rectgrad_layer([Ys[0], reversed_Ys[0]])]
+        y_rev = rectgrad_layer([Ys[0], reversed_Ys[0]])
+        #print(reversed_Ys[0].shape, y_rev.shape)
+        from innvestigate import layers as ilayers
+        return ilayers.GradientWRT(len(Xs))(Xs+Ys+[y_rev]) 
+        return [y_rev]
+    
     return RectGradReverseReLULayer
 
 class RectGrad(innvestigate.analyzer.base.ReverseAnalyzerBase):
@@ -517,16 +600,6 @@ class RectGrad(innvestigate.analyzer.base.ReverseAnalyzerBase):
         )
 
         super(RectGrad, self).__init__(model, **kwargs)
-        
-    @staticmethod
-    def threshold(x, q):
-        if len(x.shape.as_list()) > 3:
-            thresh = tf.contrib.distributions.percentile(
-                x, q, axis=[1,2,3], keep_dims=True)
-        else:
-            thresh = tf.contrib.distributions.percentile(
-                x, q, axis=1, keep_dims=True)
-        return thresh
 
     def _create_analysis(self, *args, **kwargs):
 
