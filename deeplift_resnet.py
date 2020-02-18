@@ -2,6 +2,7 @@ import numpy as np
 import PIL 
 import copy
 
+import contextlib
 import deeplift
 
 from deeplift.layers import Dense, Concat, Merge
@@ -11,6 +12,11 @@ import keras.backend as K
 from keras.utils.generic_utils import transpose_shape
 import tensorflow as tf
 import keras
+
+from deeplift.layers import helper_functions as hf
+import tensorflow as tf
+from deeplift.util import to_tf_variable
+from deeplift.layers.convolutional import *
 
 
 def monkey_patch_Merge_compute_shape(self, input_shapes):                       
@@ -308,3 +314,178 @@ class DeepLiftRelevanceReplacer:
         self.layers[-1].set_inactive()
         
         return [np.concatenate(contrib) for contrib in aggregated_contribs]
+    
+    
+
+_pos_to_pos_mxts = True
+_neg_to_neg_mxts = True
+_neg_to_pos_mxts = True
+_pos_to_neg_mxts = True
+_zero_mxts = True
+
+
+class DenseMonkeyPatch:
+    def _get_mxts_increments_for_inputs(self):
+        if (self.dense_mxts_mode == DenseMxtsMode.Linear): 
+            #different inputs will inherit multipliers differently according
+            #to the sign of inp_diff_ref (as this sign was used to determine
+            #the pos_contribs and neg_contribs; there was no breakdown
+            #by the pos/neg contribs of the input)
+            inp_diff_ref = self._get_input_diff_from_reference_vars() 
+            pos_inp_mask = hf.gt_mask(inp_diff_ref,0.0)
+            neg_inp_mask = hf.lt_mask(inp_diff_ref,0.0)
+            zero_inp_mask = hf.eq_mask(inp_diff_ref,0.0)
+
+            kernel_T = tf.transpose(self.kernel)
+            
+            inp_mxts_increments = 0
+            if _pos_to_pos_mxts:
+                 inp_mxts_increments += pos_inp_mask*(
+                    tf.matmul(self.get_pos_mxts(),
+                              kernel_T*(hf.gt_mask(kernel_T, 0.0))))
+                     
+            if _neg_to_pos_mxts:
+                 inp_mxts_increments += pos_inp_mask*(
+                    tf.matmul(self.get_neg_mxts(),
+                                kernel_T*(hf.lt_mask(kernel_T, 0.0))))
+                    
+            if _pos_to_neg_mxts:
+                inp_mxts_increments += neg_inp_mask*(
+                    tf.matmul(self.get_pos_mxts(),
+                              kernel_T*(hf.lt_mask(kernel_T, 0.0))))
+            if _neg_to_neg_mxts:
+                inp_mxts_increments += neg_inp_mask*(
+                    tf.matmul(self.get_neg_mxts(),
+                                kernel_T*(hf.gt_mask(kernel_T, 0.0))))
+            
+            if _zero_mxts:
+                inp_mxts_increments += zero_inp_mask*(
+                    tf.matmul(0.5*(self.get_pos_mxts()
+                                   +self.get_neg_mxts()), kernel_T))
+            #pos_mxts and neg_mxts in the input get the same multiplier
+            #because the breakdown between pos and neg wasn't used to
+            #compute pos_contribs and neg_contribs in the forward pass
+            #(it was based entirely on inp_diff_ref)
+            return inp_mxts_increments, inp_mxts_increments
+        else:
+            raise RuntimeError("Unsupported mxts mode: "
+                               +str(self.dense_mxts_mode))
+            
+class Conv2dMonkeyPatch:
+    def _get_mxts_increments_for_inputs(self):
+        pos_mxts = self.get_pos_mxts()
+        neg_mxts = self.get_neg_mxts()
+        inp_diff_ref = self._get_input_diff_from_reference_vars()
+        inp_act_vars = self.inputs.get_activation_vars()
+        strides_to_supply = [1]+list(self.strides)+[1]
+
+        if (self.data_format == DataFormat.channels_first):
+            pos_mxts = tf.transpose(a=pos_mxts, perm=(0,2,3,1))
+            neg_mxts = tf.transpose(a=neg_mxts, perm=(0,2,3,1))
+            inp_diff_ref = tf.transpose(a=inp_diff_ref, perm=(0,2,3,1))
+            inp_act_vars = tf.transpose(a=inp_act_vars, perm=(0,2,3,1))
+
+        output_shape = tf.shape(inp_act_vars)
+
+        if (self.conv_mxts_mode == ConvMxtsMode.Linear):
+            pos_inp_mask = hf.gt_mask(inp_diff_ref,0.0)
+            neg_inp_mask = hf.lt_mask(inp_diff_ref,0.0)
+            zero_inp_mask = hf.eq_mask(inp_diff_ref, 0.0)
+
+            inp_mxts_increments = 0
+            
+            if _pos_to_pos_mxts:
+                inp_mxts_increments += pos_inp_mask*(
+                            tf.nn.conv2d_transpose(
+                                value=pos_mxts,
+                                filter=self.kernel*hf.gt_mask(self.kernel, 0.0),
+                                output_shape=output_shape,
+                                padding=self.padding,
+                                strides=strides_to_supply
+                            ))
+            if _neg_to_pos_mxts:
+                inp_mxts_increments += pos_inp_mask*(
+                           tf.nn.conv2d_transpose(
+                                value=neg_mxts,
+                                filter=self.kernel*hf.lt_mask(self.kernel, 0.0),
+                                output_shape=output_shape,
+                                padding=self.padding,
+                                strides=strides_to_supply
+                            ))
+            if _pos_to_neg_mxts:
+                inp_mxts_increments += neg_inp_mask*(
+                            tf.nn.conv2d_transpose(
+                                value=pos_mxts,
+                                filter=self.kernel*hf.lt_mask(self.kernel, 0.0),
+                                output_shape=output_shape,
+                                padding=self.padding,
+                                strides=strides_to_supply
+                            ))
+            if _neg_to_neg_mxts:
+                inp_mxts_increments += neg_inp_mask*(
+                           tf.nn.conv2d_transpose(
+                                value=neg_mxts,
+                                filter=self.kernel*hf.gt_mask(self.kernel, 0.0),
+                                output_shape=output_shape,
+                                padding=self.padding,
+                                strides=strides_to_supply
+                           ))
+            if _zero_mxts:
+                inp_mxts_increments += zero_inp_mask*tf.nn.conv2d_transpose(
+                                value=0.5*(pos_mxts+neg_mxts),
+                                filter=self.kernel,
+                                output_shape=output_shape,
+                                padding=self.padding,
+                                strides=strides_to_supply)
+            pos_mxts_increments = inp_mxts_increments
+            neg_mxts_increments = inp_mxts_increments
+        else:
+            raise RuntimeError("Unsupported conv mxts mode: "
+                               +str(self.conv_mxts_mode))
+
+        if (self.data_format == DataFormat.channels_first):
+            pos_mxts_increments = tf.transpose(a=pos_mxts_increments,
+                                               perm=(0,3,1,2))
+            neg_mxts_increments = tf.transpose(a=neg_mxts_increments,
+                                               perm=(0,3,1,2))
+
+        return pos_mxts_increments, neg_mxts_increments
+
+
+@contextlib.contextmanager
+def monkey_patch_deeplift_neg_pos_mxts(cross_mxts=True):
+    global _pos_to_pos_mxts, _neg_to_neg_mxts 
+    global _neg_to_pos_mxts, _pos_to_neg_mxts, _zero_mxts 
+    
+    _pos_to_pos_mxts = True
+    _neg_to_neg_mxts = True
+    _neg_to_pos_mxts = True
+    _pos_to_neg_mxts = True
+    _zero_mxts = True
+    
+    if cross_mxts == False:
+        _neg_to_pos_mxts = False
+        _pos_to_neg_mxts = False
+    
+    saved_dense_func = copy.deepcopy(
+        deeplift.layers.core.Dense._get_mxts_increments_for_inputs)
+    saved_conv_func = copy.deepcopy(
+        deeplift.layers.convolutional.Conv2D._get_mxts_increments_for_inputs)
+    
+    deeplift.layers.core.Dense._get_mxts_increments_for_inputs = \
+        DenseMonkeyPatch._get_mxts_increments_for_inputs
+
+    deeplift.layers.convolutional.Conv2D._get_mxts_increments_for_inputs = \
+        Conv2dMonkeyPatch._get_mxts_increments_for_inputs
+    try:
+        yield
+    finally:
+        deeplift.layers.core.Dense._get_mxts_increments_for_inputs = saved_dense_func
+        deeplift.layers.convolutional.Conv2D._get_mxts_increments_for_inputs = saved_conv_func
+        
+        _pos_to_pos_mxts = True
+        _neg_to_neg_mxts = True
+        _neg_to_pos_mxts = True
+        _pos_to_neg_mxts = True
+        _zero_mxts = True
+        

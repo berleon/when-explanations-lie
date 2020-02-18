@@ -69,11 +69,6 @@ from innvestigate.analyzer.relevance_based import utils as rutils
 import innvestigate.analyzer.relevance_based.relevance_analyzer
 
 
-def _prepare_model(self, model):
-    return super(DeepTaylor, self)._prepare_model(model)
-
-# otherwise DTD does not work on negative outputs
-DeepTaylor._prepare_model = _prepare_model
 
 
 def add_init(shape, dtype=None):
@@ -199,6 +194,7 @@ def get_bn_reverse_layer_cls_with_rule(rule):
 @contextlib.contextmanager
 def custom_add_bn_rule(rule):
     try:
+        #
         old_add_cls = copy.deepcopy(innvestigate.analyzer.relevance_based.relevance_analyzer.AddReverseLayer)
         old_bn_cls = copy.deepcopy(innvestigate.analyzer.relevance_based.relevance_analyzer.BatchNormalizationReverseLayer)
         if rule is not None:
@@ -228,7 +224,43 @@ def alpha_beta_wrapper(alpha, beta):
 def get_custom_rule(innv_name, kwargs):
     if innv_name == 'lrp.alpha_beta':
         return alpha_beta_wrapper(kwargs['alpha'], kwargs['beta'])
+    elif innv_name == 'lrp.alpha_1_beta_0':
+        return alpha_beta_wrapper(1, 0)
+    elif innv_name == 'lrp.alpha_2_beta_1':
+        return alpha_beta_wrapper(2, 1)
     elif innv_name == 'lrp.sequential_preset_a':
         return alpha_beta_wrapper(1, 0)
     elif innv_name == 'lrp.sequential_preset_b':
         return alpha_beta_wrapper(2, 1)
+
+
+
+def _reverse_model(self,
+                   model,
+                   stop_analysis_at_tensors=[],
+                   return_all_reversed_tensors=False):
+    ret = kgraph.reverse_model(
+        model,
+        reverse_mappings=self._reverse_mapping,
+        default_reverse_mapping=self._default_reverse_mapping,
+        head_mapping=self._head_mapping,
+        stop_mapping_at_tensors=stop_analysis_at_tensors,
+        verbose=self._reverse_verbose,
+        clip_all_reversed_tensors=self._reverse_clip_values,
+        project_bottleneck_tensors=self._reverse_project_bottleneck_layers,
+        return_all_reversed_tensors=return_all_reversed_tensors)
+
+    if return_all_reversed_tensors:
+        self._reversed_tensors_raw = ret[1]
+    return ret
+
+def _prepare_model(self, model):
+    return super(DeepTaylor, self)._prepare_model(model)
+
+# otherwise DTD does not work on negative outputs
+def apply_static_monkey_patches():
+    innvestigate.analyzer.base.ReverseAnalyzerBase._reverse_model = _reverse_model
+    DeepTaylor._prepare_model = _prepare_model
+
+
+apply_static_monkey_patches()

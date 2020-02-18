@@ -85,6 +85,13 @@ def normalize_sanity(x, percentile=99):
     """
     for ssim we don't normalize negative and positive contributions separatly
     """
+    if (x > 0).all() or (x < 0).all():
+        
+        # special case
+        x_abs = np.abs(x)
+        
+        vmax = np.percentile(x_abs, percentile)
+        #return np.clip(x_abs / vmax, 0, 1)
     vmin = np.percentile(x, percentile)
     vmax = np.percentile(x, 100 - percentile)
     return np.clip((x - vmin) / (vmax - vmin), 0, 1)
@@ -95,20 +102,29 @@ def normalize_visual(x, percentile=99):
     """
     for visualization we normalize pos and neg attribution separatly.
     """
+    
+    if (x > 0).all() or (x < 0).all():
+        # special case
+        x_abs = np.abs(x)
+        vmax = np.percentile(x_abs, percentile)
+        return np.sign(x.mean()) * x_abs / vmax
+    
     vmax = np.percentile(x, percentile)
     vmin = np.percentile(x, 100 - percentile)
-    vmax
-    x_pos = x * (x > 0)
+    
+    x_pos = x * (x >= 0)
     x_neg = x * (x < 0)
     
-    x_pos = x_pos / vmax
-    x_neg = - x_neg / vmin
+    if np.abs(vmax) > 0:
+        x_pos = x_pos / vmax
+    if np.abs(vmin) > 0:
+        x_neg = - x_neg / vmin
     return np.clip(x_pos + x_neg, -1, 1)
 
-def ssim_flipped(x, y, win_size=5, **kwargs):
-    norm_x = normalize(x)
-    norm_y = normalize(y)
-    norm_y_flip = normalize(-y)
+def ssim_flipped(x, y, win_size=5, percentile=99, **kwargs):
+    norm_x = normalize_sanity(x, percentile)
+    norm_y = normalize_sanity(y, percentile)
+    norm_y_flip = normalize_sanity(-y, percentile)
     
     ssim = compare_ssim(norm_x, norm_y, win_size=win_size, **kwargs)
     ssim_flip = compare_ssim(norm_x, norm_y_flip, win_size=win_size, **kwargs)
@@ -116,9 +132,9 @@ def ssim_flipped(x, y, win_size=5, **kwargs):
 
 
 def l2_flipped(x, y):
-    norm_x = normalize(x)
-    norm_y = normalize(y)
-    norm_y_flip = normalize(-y)
+    norm_x = normalize_sanity(x)
+    norm_y = normalize_sanity(y)
+    norm_y_flip = normalize_sanity(-y)
     l2 = np.mean(np.sqrt((norm_x - norm_y)**2))
     l2_flipped = np.mean(np.sqrt((norm_x - norm_y_flip)**2))
     return max(l2, l2_flipped)
@@ -135,44 +151,46 @@ def norm_image(x):
     ma = x.max()
     return (x - mi) / (ma - mi)
 
-def load_image_paths(validation_dir):
+def get_path_to_target_dict(validation_dir):
     val_filepaths = glob.glob(validation_dir + '/**/*.JPEG')
     val_filepaths = sorted(val_filepaths)
     val_targets = glob.glob(validation_dir + '/*')
     val_targets = [t.split('/')[-1] for t in sorted(val_targets)]
     val_path_with_target = []
+    path_to_target = OrderedDict()
     for path in val_filepaths:
         synnet = path.split('/')[-2]
         target = val_targets.index(synnet)
-        val_path_with_target.append((path, target))
-    return val_path_with_target
+        path_to_target[path] = target
+    return path_to_target
 
 def load_images_imagenet(innv_net, imagenet_val_dir, ex_image_path, n_selected_imgs):
-    val_paths = load_image_paths(imagenet_val_dir)
+    path_to_target = get_path_to_target_dict(imagenet_val_dir)
+    image_paths = list(path_to_target.keys())
     ex_image_full_path, ex_target = [
-        (path, target) for (path, target) in val_paths 
+        (path, target) for (path, target) in path_to_target.items() 
         if path.endswith(ex_image_path)][0]
     
-    ex_image_idx = val_paths.index((ex_image_full_path, ex_target))
+    ex_image_idx = image_paths.index(ex_image_full_path)
 
     np.random.seed(0)
-    selected_img_idxs = [ex_image_idx] + np.random.choice([idx for idx in range(len(val_paths))
+    selected_img_idxs = [ex_image_idx] + np.random.choice([idx for idx in range(len(path_to_target))
                                                            if idx != ex_image_idx], n_selected_imgs - 1).tolist()
     
     
     ex_image = preprocess(load_image(os.path.join(imagenet_val_dir, ex_image_path), 224),
                           innv_net)[np.newaxis]
-    ex_target = [target for (path, target) in val_paths 
-                 if path.endswith(ex_image_path)][0]
+    ex_target = [target for (path, target) in path_to_target.items() 
+                 if path.endswith(ex_image_path)]
 
-    val_images = [(
-        preprocess(
-            load_image(val_paths[idx][0], 224),
-            innv_net
-        )[np.newaxis],
-        val_paths[idx][1]) for idx in selected_img_idxs]
+    images = []
+    for idx in selected_img_idxs:
+        image_path = image_paths[idx]
+        target = path_to_target[image_path]
+        img = preprocess(load_image(image_path, 224), innv_net)
+        images.append((img[np.newaxis], target))
     
-    return ex_image, ex_target, ex_image_idx, val_images, selected_img_idxs
+    return ex_image, ex_target, ex_image_idx, images, selected_img_idxs
 
 
 def load_images_cifar10(n_selected_imgs):
@@ -223,7 +241,9 @@ def load_cifar10(load_weights):
 
     
     if load_weights:
-        model.load_weights("saved_models/keras_cifar10_model.h5")
+        if type(load_weights) == bool:
+            load_weights = "saved_models/keras_cifar10_model.h5"
+        model.load_weights(load_weights)
     return model
 
 
@@ -235,8 +255,8 @@ def load_model(model='vgg16', load_weights=True, load_patterns="relu"):
     
     load_func = getattr(innvestigate.applications.imagenet, model)
     net = load_func(load_weights=load_weights, load_patterns=load_patterns)
-    model = keras.models.Model(inputs=net["in"], outputs=net["sm_out"])
-    model_wo_softmax = iutils.keras.graph.model_wo_softmax(model)
+    model_wo_softmax = keras.models.Model(inputs=net["in"], outputs=net["out"])
+    #model_wo_softmax = iutils.keras.graph.model_wo_softmax(model)
     
     channels_first = keras.backend.image_data_format() == "channels_first"
     color_conversion = "BGRtoRGB" if net["color_coding"] == "BGR" else None
@@ -388,12 +408,17 @@ def heatmap_postprocess(name, x):
     
 def get_analyser_params(input_range, smoothgrad_scale=0.15):
     noise_scale = smoothgrad_scale * (input_range[1] - input_range[0])
-    return [
+    return [ 
         ('GuidedBP',  "guided_backprop",  'abs.max', [], {}),
         ('Deconv',  "deconvnet",  'abs.max', [], {}),
         ('RectGrad', 'rect_grad', 'abs.max', [], {}),
-        ('DTD', "deep_taylor.bounded", 'sum', [],
+        ('DTD', "deep_taylor.bounded", 'sum', 
+             ['exclude_resnet50'],
              {"low": input_range[0], "high": input_range[1]}),
+        ("PatternAttr.", "pattern.attribution",
+             'sum', ['exclude_resnet50', 'exclude_cifar10'], {}),
+        ("PatternNet", "pattern.net",
+             'sum', ['exclude_resnet50', 'exclude_cifar10'], {}),
         ('LRP $\\alpha1\\beta0$',  'lrp.alpha_beta', 
              'sum', [], {'alpha': 1, 'beta': 0}),
         ('LRP $\\alpha2\\beta1$',  'lrp.alpha_beta', 
@@ -402,42 +427,47 @@ def get_analyser_params(input_range, smoothgrad_scale=0.15):
              'sum', [], {'alpha': 5, 'beta': 4}),
         #('$\\alpha=10, \\beta=9$-LRP',  'lrp.alpha_beta', 
         #     'sum', [], {'alpha': 10, 'beta': 9}),
+        ('LRP-z', 'lrp.z', 'sum', [], {}),
         ('LRP CMP $\\alpha1\\beta0$', 'lrp.sequential_preset_a', 
              'sum', [], {"epsilon": 1e-10}), 
         ('LRP CMP $\\alpha2\\beta1$',  'lrp.sequential_preset_b', 
              'sum', [], {"epsilon": 1e-10}), 
-        ("PatternAttr.", "pattern.attribution",
-             'sum', ['exclude_resnet50', 'exclude_cifar10'], {}),
-
-        ('LRP-z', 'lrp.z', 'sum', [], {}),
         ('SmoothGrad',  "smoothgrad",  'abs.max', ['exclude_cos_sim'],
              {"augment_by_n": 50, "noise_scale": noise_scale}),
-        ('Gradient',  "gradient",  'abs.max', [], {}),
         ("DeepLIFT Rev.C.", "deep_lift.wrapper", 'sum', [],
              {'nonlinear_mode': 'reveal_cancel'}),
         ("DeepLIFT Resc.",  "deep_lift.wrapper", 'sum', [],
              {'nonlinear_mode': 'rescale'}),
+        ("DeepLIFT Abla.",  "deep_lift.wrapper", 'sum', [],
+             {'nonlinear_mode': 'rescale', 
+              'cross_mxts': False,
+             }),
+        ('Gradient',  "gradient",  'abs.max', [], {}),
     ]
     
-colors = sns.color_palette('colorblind', n_colors=5)
+colors = sns.color_palette('colorblind', n_colors=6)
 
 mpl_styles = OrderedDict([
     ('GuidedBP',                   {'marker': '$G$', 'color': colors[0]}),
-    ('Deconv',                     {'marker': '$V$', 'color': colors[1]}),
-    ('RectGrad',                   {'marker': '$R$', 'color': colors[2]}),
-    ('LRP-z',                      {'marker': 'D',   'color': colors[3]}),
-    ('DTD',                        {'marker': '$T$', 'color': colors[4]}),
-    ('PatternAttr.',               {'marker': '$P$', 'color': colors[0]}),
-    ('LRP $\\alpha1\\beta0$',      {'marker': '<',   'color': colors[1]}),
-    ('LRP $\\alpha2\\beta1$',      {'marker': '>',   'color': colors[2]}),
-    ('LRP $\\alpha5\\beta4$',      {'marker': '^',   'color': colors[3]}),
-    ('LRP CMP $\\alpha1\\beta0$',  {'marker': 's',   'color': colors[4]}),
-    ('LRP CMP $\\alpha2\\beta1$',  {'marker': 'P',   'color': colors[0]}),
+    ('Deconv',                     {'marker': '$V$', 'color': colors[0]}),
+    ('RectGrad',                   {'marker': '$R$', 'color': colors[0]}),
+    ('DTD',                        {'marker': '$T$', 'color': colors[3]}),
+    ('PatternAttr.',               {'marker': '$P$', 'color': colors[3]}),
+    ('PatternNet',                 {'marker': '$N$', 'color': colors[3]}),
+    ('LRP-z',                      {'marker': '$Z$',   'color': colors[2]}), 
+    ('LRP $\\alpha1\\beta0$',      {'marker': '$1$',   'color': colors[2]}),
+    ('LRP $\\alpha2\\beta1$',      {'marker': '$2$',   'color': colors[2]}),
+    ('LRP $\\alpha5\\beta4$',      {'marker': '$5$',   'color': colors[2]}),
+    ('LRP CMP $\\alpha1\\beta0$',  {'marker': '^',   'color': colors[1]}),
+    ('LRP CMP $\\alpha2\\beta1$',  {'marker': 'P',   'color': colors[1]}),
+
     ('SmoothGrad',                 {'marker': 'o',   'color': colors[1]}),
+    ('DeepLIFT Rev.C.',            {'marker': '$L$',   'color': colors[4]}),
+    ('DeepLIFT Resc.',             {'marker': '$D$',   'color': colors[4]}),
+    ("DeepLIFT Abla.",             {'marker': '$A$',   'color': colors[4]}),
     ('Gradient',                   {'marker': 'v',   'color': 'black'}),
-    ('DeepLIFT Rev.C.',            {'marker': '$D$',   'color': colors[2]}),
-    ('DeepLIFT Resc.',             {'marker': '$D$',   'color': colors[3]}),
 ])
+
 
 class CIFAR10Meta:
     def __init__(self, model, n_selected_images):
@@ -457,13 +487,40 @@ class CIFAR10Meta:
         self.csc_replacement_layers = [self.names.to_raw(l)
                                     for l in self.csc_replacement_layers]
 
+        
+class ImageNetGenerator:
+    def __init__(self, imagenet_dir, preprocess_func, n_selected_imgs=None):
+        self.preprocess_func = preprocess_func
+        self.path_to_target = get_path_to_target_dict(imagenet_dir)
+        
+        self.image_paths = list(self.path_to_target.keys())
+
+        np.random.seed(0)
+        if n_selected_imgs is None:
+            n_selected_imgs = len(self.image_paths)
+        
+        self.selected_img_idxs = np.random.choice(len(self.image_paths), replace=False, 
+                                                  size=n_selected_imgs).tolist()
+    def stream(self):
+        for idx in self.selected_img_idxs:
+            image_path = self.image_paths[idx]
+            target = self.path_to_target[image_path]
+            img = self.preprocess_func(load_image(image_path, 224))
+            yield img[np.newaxis], target
+            
+            
 class ImageNetMeta:
     def __init__(self, model, model_name, innv_net,  n_val_images, 
-                 imagenet_val_dir, ex_image_path
+                 imagenet_dir, ex_image_path
                 ):
+        val_dir = os.path.join(imagenet_dir, 'validation')
+        train_dir = os.path.join(imagenet_dir, 'train')
         (self.ex_image, self.ex_target, self.ex_image_idx, 
          self.images, self.image_indices) = load_images_imagenet(
-            innv_net, imagenet_val_dir, ex_image_path, n_val_images)
+            innv_net, val_dir, ex_image_path, n_val_images)
+        
+        self.train_sample_gen = ImageNetGenerator(train_dir, innv_net['preprocess_f'])
+        
         self.patterns = innv_net['patterns']
         self.names = LayerNames(model, model_name)
         self.n_layers = len(model.layers)
@@ -494,21 +551,6 @@ class ImageNetMeta:
         self.csc_replacement_layers = [self.names.to_raw(l)
                                      for l in self.csc_replacement_layers]
         self.n_layers = len(model.layers)
-
-
-
-def load_model_and_meta(model_name, n_selected_imgs=200, load_weights=True, clear_session=True):
-    if clear_session:
-        keras.backend.clear_session()
-    if model_name in ['vgg16', 'resnet50']:
-        model, innv_net, color_conversion = load_model(model_name, load_weights) 
-        meta = ImageNetMeta(model, model_name, innv_net, n_selected_imgs)
-    elif model_name == 'cifar10':
-        model, _, _ = load_model('cifar10', load_weights)
-        meta = CIFAR10Meta(model, n_selected_imgs)
-    else:
-        raise ValueError()
-    return model, meta
         
 
 def create_replacement_class(analyser_cls):
