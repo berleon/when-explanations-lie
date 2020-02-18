@@ -2,7 +2,8 @@
 *.pickle
 figures/
 cache/
-images/
+saved_models/
+export_defs/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
