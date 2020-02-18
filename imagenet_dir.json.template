@@ -1,0 +1,4 @@
+{
+ "myhost": "/path/to/imagenet/dir/",
+ "anotherhost": "/a/different/path/to/imagenet/dir/"
+}

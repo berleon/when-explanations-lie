@@ -279,7 +279,19 @@ class DeepLiftRelevanceReplacer:
         return layer_names.index(deeplift_name)
     
     def get_relevances(self, input_value,  relevance_value,
-                       set_layer, selected_layers, reference=None):
+                       set_layer, output_layers, reference=None):
+        
+        def parse_input_output(desc):
+            if type(desc) == tuple:
+                layer_name, input_or_output = desc
+            else:
+                layer_name = desc
+                input_or_output = 'output'
+
+            if type(input_or_output) == str:
+                input_or_output = (input_or_output, 0)
+                return layer_name, input_or_output
+            
         def run_single(single_image, single_relevance_value, single_reference):
             sess = keras.backend.get_session()
             return sess.run(
@@ -294,7 +306,7 @@ class DeepLiftRelevanceReplacer:
             
         set_layer_idx = self._get_layer_idx(set_layer)
         changed_layer = self.layers[set_layer_idx]
-        selected_layer_idxs = [self._get_layer_idx(name) for name in selected_layers]
+        selected_layer_idxs = [self._get_layer_idx(name) for name in output_layers]
         
         if reference is None:
             reference = np.zeros_like(input_value)

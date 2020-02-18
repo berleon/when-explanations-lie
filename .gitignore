@@ -4,6 +4,8 @@ figures/
 cache/
 saved_models/
 export_defs/
+code-submission/
+repos/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

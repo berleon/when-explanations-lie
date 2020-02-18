@@ -558,35 +558,65 @@ def create_replacement_class(analyser_cls):
     class ReplaceBackward(analyser_cls):
         def __init__(self, model, *args, **kwargs):
             kwargs['reverse_keep_tensors'] = True
+            #kwargs['reverse_verbose'] = True
             super().__init__(model, *args, **kwargs)
         
         def _create_analysis(self, *args, **kwargs):
             outputs, relevances_per_layer = super()._create_analysis(*args, **kwargs)
-            self._relevances_per_layer = relevances_per_layer[::-1]
             return outputs, relevances_per_layer
         
         def _get_layer_idx(self, name):
-            layer = self._model.get_layer(name='dense_2')
+            layer = self._model.get_layer(name=name)
             return self._model.layers.index(layer)
         
         def get_relevances(self, input_value, relevance_value,  
-                           set_layer, selected_layers):
+                           set_layer, output_layers):
             """
             return relevance values
             """
             sess = keras.backend.get_session()
             inp = self._analyzer_model.inputs[0]
-            set_layer_idx = self._get_layer_idx(set_layer)
-            selected_layer_idxs = [
-                self._get_layer_idx(n) for n in selected_layers]
-            rel_tensor = self._relevances_per_layer[set_layer_idx]
             
-            return sess.run(
-                [self._relevances_per_layer[i] for i in selected_layer_idxs],
+            def parse_input_output(desc):
+                if type(desc) == tuple:
+                    layer_name, input_or_output = desc
+                else:
+                    layer_name = desc
+                    input_or_output = 'output'
+
+                if type(input_or_output) == str:
+                    input_or_output = (input_or_output, 0)
+                    return layer_name, input_or_output
+            
+            def get_rel_tensor(layer_name, input_or_output):
+                layer = self._model.get_layer(name=layer_name)
+                if input_or_output[0] == 'input':
+                    if type(layer.input) != list:
+                        forward_tens = layer.input
+                    else:
+                        forward_tens = layer.input[input_or_output[1]]
+                else:
+                    if type(layer.output) != list:
+                        forward_tens = layer.output
+                    else:
+                        forward_tens = layer.output[input_or_output[1]]
+                    
+                return self._reversed_tensors_raw[forward_tens]['final_tensor']
+            
+            set_layer_name, set_input_or_output = parse_input_output(set_layer)
+            
+            output_layers = [parse_input_output(n) for n in output_layers]
+            rel_tensor = get_rel_tensor(set_layer_name, set_input_or_output)
+            
+            output_rel_tensors = [get_rel_tensor(*o) for o in output_layers]
+        
+            output_relevances = sess.run(
+                output_rel_tensors,
                 feed_dict={ 
                     inp: input_value,
                     rel_tensor: relevance_value
-           })
+                })
+            return output_relevances 
         
     return ReplaceBackward 
 
@@ -597,6 +627,11 @@ def get_replacement_analyser(model, analyser_cls, **kwargs):
     replacement_cls = create_replacement_class(analyser_cls)
     
     return replacement_cls(model, **kwargs)
+
+
+
+    
+    
 
 
 def get_rect_grad_reverse_rule_layer(percentile):
